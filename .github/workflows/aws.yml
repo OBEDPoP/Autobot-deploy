@@ -1,0 +1,70 @@
+name: Deploy to Kubernetes
+
+on:
+  workflow_dispatch:         # Disable this section when push type is enabled
+ # push:                       Enable this section to have the pipelibe work on push ti git
+ #   branches:
+ #    - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps: 
+    - name: Checkout Code   #code checkout
+      uses: actions/checkout@v2
+
+    - name: SonarQube Scan  #scan code quality using sonarcube, terminates if scan results shows as bigger depreciencies
+      run: |
+        sonar-scanner
+        # Adding Quality Gate Check
+        status=$(curl -u ${{ secrets.SONAR_TOKEN }}: "http://sonar.obedpop.com:9000/api/qualitygates/project_status?projectKey=cloud-deployment-bot" | jq -r '.projectStatus.status')
+        if [ "$status" != "OK" ]; then
+          echo "SonarQube Quality Gate failed"
+          exit 1
+        fi
+
+    - name: Build Docker Image #build Docker imge
+      run: |
+        docker build -t myapp:${{ github.sha }} .
+
+    - name: Push to Container Registry # update to registy/artifactory/S3 etc.,
+      run: |
+        echo ${{ secrets.REGISTRY_PASSWORD }} | docker login -u ${{ secrets.REGISTRY_USERNAME }} --password-stdin
+        docker tag myapp:${{ github.sha }} ${{ secrets.REGISTRY }}/myapp:${{ github.sha }}
+        docker push ${{ secrets.REGISTRY }}/myapp:${{ github.sha }}
+
+    - name: OWASP ZAP Scan   # OWASP ZAP SCAN, terminates if scan results shows as bigger depreciencies
+      run: |
+        docker run -d -p 8080:8080 --name zap-container owasp/zap2docker-stable zap.sh -daemon -port 8080
+        sleep 30
+        docker exec zap-container zap-cli quick-scan --self-contained http://app.obedpop.com
+        docker exec zap-container zap-cli report -o zap_report.html
+        docker exec zap-container zap-cli alerts --base-url http://app.obedpop.com --alert-level High --exit-code False
+        docker stop zap-container
+        if [ $? -ne 0 ]; then
+          echo "OWASP ZAP Scan failed"
+          exit 1
+        fi
+
+    - name: Send Email with Scan Results #  sends sthe email with the sonar and ZAP results 
+      run: |
+        echo "Subject: Scan Results\n\nSonarQube and OWASP ZAP scans have completed. Please review the attached report and approve the deployment." | sendmail -v youremail@example.com
+        # Attach the scan report
+        echo "SonarQube Report: http://sonar.obedpop.com:9000/dashboard?id=cloud-deployment-bot" >> email_body.txt
+        echo "OWASP ZAP Report: zap_report.html" >> email_body.txt
+        sendmail -v deployL3@obedpop.com < email_body.txt
+
+    - name: Request Deployment Approval # requests for approval for deployment to process after the log copy sent to the L3 team via mail
+      uses: wagoid/commitlint-github-action@v4.1.1
+      with:
+        configFile: "commitlint.config.js"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Deploy to Kubernetes  # on approval deploys to kubernetese
+      if: ${{ github.event.pull_request.merged == true }}
+      run: |
+        kubectl apply -f k8s/deployment.yaml
+        kubectl apply -f k8s/service.yaml
+
