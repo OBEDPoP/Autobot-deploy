@@ -1,2 +1,2 @@
 # Autobot-deploy
-this is script to deploy to cloud automatically container based applications
+this has github actions script/workflow to deploy to cloud automatically container based applications
